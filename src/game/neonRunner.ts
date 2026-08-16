@@ -8,37 +8,39 @@ export interface GameCallbacks {
   onState: (state: GameState) => void;
 }
 
-const LANES = [-2.2, 0, 2.2];
+const LANES = [-2, 0, 2];
+const TRACK_WIDTH = 6;
+const COLORS = [0xFF6B6B, 0x4ECDC4, 0xFFE66D, 0x95E1D3, 0xF38181, 0xAA96DA, 0xFCBBD3];
 
 export class NeonRunner {
   private renderer: THREE.WebGLRenderer;
   private scene = new THREE.Scene();
-  private camera: THREE.PerspectiveCamera;
+  private camera!: THREE.PerspectiveCamera;
   private clock = new THREE.Clock();
   private raf = 0;
   private disposed = false;
 
-  private ship = new THREE.Group();
-  private shipTilt = 0;
+  private player = new THREE.Group();
+  private playerTilt = 0;
+  private playerRunAnimation = 0;
   private lane = 1;
   private laneX = 0;
 
   private obstacles: THREE.Mesh[] = [];
-  private orbs: THREE.Mesh[] = [];
-  private trail: THREE.Points;
-  private trailPositions: Float32Array;
-  private trailIndex = 0;
+  private coins: THREE.Mesh[] = [];
+  private platforms: THREE.Mesh[] = [];
+  private buildings: THREE.Mesh[] = [];
+  private trees: THREE.Mesh[] = [];
+  private lights: THREE.Mesh[] = [];
+  private sceneryPieces: THREE.Mesh[] = [];
 
-  private tunnelRings: THREE.Mesh[] = [];
-  private stars: THREE.Points;
-  private floorBars: THREE.Mesh[] = [];
-
-  private speed = 22;
+  private speed = 28;
   private distance = 0;
   private score = 0;
   private shake = 0;
   private state: GameState = "ready";
   private spawnTimer = 0;
+  private buildingSpawnTimer = 0;
 
   constructor(
     private container: HTMLElement,
@@ -48,65 +50,18 @@ export class NeonRunner {
     this.renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
     this.renderer.setSize(container.clientWidth, container.clientHeight);
     this.renderer.domElement.style.display = "block";
+    this.renderer.shadowMap.enabled = true;
+    this.renderer.shadowMap.type = THREE.PCFShadowMap;
+    this.renderer.toneMapping = THREE.ACESFilmicToneMapping;
+    this.renderer.toneMappingExposure = 1.2;
     container.appendChild(this.renderer.domElement);
 
-    this.scene.fog = new THREE.FogExp2(0x05010f, 0.016);
-    this.scene.background = new THREE.Color(0x05010f);
-
-    this.camera = new THREE.PerspectiveCamera(
-      72,
-      container.clientWidth / container.clientHeight,
-      0.1,
-      300,
-    );
-    this.camera.position.set(0, 2.6, 8);
-
-    this.buildLights();
-    this.buildShip();
-    this.buildTunnel();
-    this.buildGrid();
-
-    // trail particles
-    const N = 300;
-    this.trailPositions = new Float32Array(N * 3);
-    for (let i = 0; i < N; i++) this.trailPositions[i * 3 + 2] = 999;
-    const tg = new THREE.BufferGeometry();
-    tg.setAttribute("position", new THREE.BufferAttribute(this.trailPositions, 3));
-    this.trail = new THREE.Points(
-      tg,
-      new THREE.PointsMaterial({
-        color: 0x35f2ff,
-        size: 0.035,
-        transparent: true,
-        opacity: 0.7,
-        blending: THREE.AdditiveBlending,
-        depthWrite: false,
-      }),
-    );
-    this.scene.add(this.trail);
-
-    // starfield
-    const sN = 700;
-    const sp = new Float32Array(sN * 3);
-    for (let i = 0; i < sN; i++) {
-      sp[i * 3] = (Math.random() - 0.5) * 90;
-      sp[i * 3 + 1] = Math.random() * 40 - 5;
-      sp[i * 3 + 2] = -Math.random() * 260;
-    }
-    const sg = new THREE.BufferGeometry();
-    sg.setAttribute("position", new THREE.BufferAttribute(sp, 3));
-    this.stars = new THREE.Points(
-      sg,
-      new THREE.PointsMaterial({
-        color: 0xff4fd8,
-        size: 0.35,
-        transparent: true,
-        opacity: 0.7,
-        blending: THREE.AdditiveBlending,
-        depthWrite: false,
-      }),
-    );
-    this.scene.add(this.stars);
+    // Beautiful sky gradient
+    this.setupScene();
+    this.buildLighting();
+    this.buildPlayer();
+    this.buildRailway();
+    this.buildEnvironment();
 
     window.addEventListener("resize", this.onResize);
     window.addEventListener("keydown", this.onKey);
@@ -115,130 +70,452 @@ export class NeonRunner {
     this.loop();
   }
 
-  private buildLights() {
-    this.scene.add(new THREE.AmbientLight(0x4455ff, 0.6));
-    const d = new THREE.DirectionalLight(0x66ffff, 1.2);
-    d.position.set(3, 8, 5);
-    this.scene.add(d);
-    const p = new THREE.PointLight(0xff2fd0, 3, 30);
-    p.position.set(0, 2, 2);
-    this.scene.add(p);
+  private setupScene() {
+    // Sky gradient using canvas texture
+    const canvas = document.createElement("canvas");
+    canvas.width = 512;
+    canvas.height = 512;
+    const ctx = canvas.getContext("2d")!;
+    
+    const gradient = ctx.createLinearGradient(0, 0, 0, 512);
+    gradient.addColorStop(0, "#87CEEB");
+    gradient.addColorStop(0.5, "#E0F6FF");
+    gradient.addColorStop(1, "#FFFACD");
+    ctx.fillStyle = gradient;
+    ctx.fillRect(0, 0, 512, 512);
+    
+    const skyTexture = new THREE.CanvasTexture(canvas);
+    this.scene.background = skyTexture;
+    
+    // Fog for depth
+    this.scene.fog = new THREE.Fog(0xE0F6FF, 120, 300);
+
+    // Initialize camera
+    this.camera = new THREE.PerspectiveCamera(
+      60,
+      this.container.clientWidth / this.container.clientHeight,
+      0.1,
+      500,
+    );
+    this.camera.position.set(0, 5.2, 8.5);
   }
 
-  private buildShip() {
-    const body = new THREE.Mesh(
-      new THREE.ConeGeometry(0.55, 1.8, 4),
+  private buildLighting() {
+    // Ambient light for overall brightness
+    const ambientLight = new THREE.AmbientLight(0xffffff, 0.8);
+    this.scene.add(ambientLight);
+
+    // Warm sun light with shadows
+    const sunLight = new THREE.DirectionalLight(0xffd89b, 1.2);
+    sunLight.position.set(40, 60, 30);
+    sunLight.castShadow = true;
+    sunLight.shadow.mapSize.width = 2048;
+    sunLight.shadow.mapSize.height = 2048;
+    sunLight.shadow.camera.far = 300;
+    sunLight.shadow.camera.left = -100;
+    sunLight.shadow.camera.right = 100;
+    sunLight.shadow.camera.top = 100;
+    sunLight.shadow.camera.bottom = -100;
+    sunLight.shadow.bias = -0.0001;
+    this.scene.add(sunLight);
+
+    // Fill light for balanced lighting
+    const fillLight = new THREE.DirectionalLight(0x87ceeb, 0.6);
+    fillLight.position.set(-40, 30, -30);
+    this.scene.add(fillLight);
+
+    // Rim light for definition
+    const rimLight = new THREE.DirectionalLight(0xff9999, 0.3);
+    rimLight.position.set(0, 20, -50);
+    this.scene.add(rimLight);
+  }
+
+  private buildPlayer() {
+    // Head
+    const head = new THREE.Mesh(
+      new THREE.SphereGeometry(0.45, 20, 20),
       new THREE.MeshStandardMaterial({
-        color: 0x0affff,
-        emissive: 0x0a6f8f,
-        metalness: 0.9,
-        roughness: 0.15,
+        color: 0xffc9a8,
+        emissive: 0xff9955,
+        emissiveIntensity: 0.2,
+        metalness: 0.1,
+        roughness: 0.8,
       }),
     );
-    body.rotation.x = -Math.PI / 2;
-    this.ship.add(body);
+    head.position.y = 1.3;
+    head.castShadow = true;
+    head.receiveShadow = true;
+    this.player.add(head);
 
-    const glow = new THREE.Mesh(
-      new THREE.SphereGeometry(0.26, 16, 16),
+    // Hair
+    const hair = new THREE.Mesh(
+      new THREE.SphereGeometry(0.5, 20, 20),
+      new THREE.MeshStandardMaterial({
+        color: 0x8B4513,
+        emissive: 0x5C2E0F,
+        emissiveIntensity: 0.3,
+        metalness: 0.2,
+        roughness: 0.7,
+      }),
+    );
+    hair.position.set(0, 1.5, -0.1);
+    hair.scale.set(1, 1.1, 0.9);
+    hair.castShadow = true;
+    hair.receiveShadow = true;
+    this.player.add(hair);
+
+    // Eyes
+    const eyeGeo = new THREE.SphereGeometry(0.1, 12, 12);
+    const eyeMat = new THREE.MeshBasicMaterial({ color: 0xffffff });
+    
+    const leftEye = new THREE.Mesh(eyeGeo, eyeMat);
+    leftEye.position.set(-0.15, 1.4, 0.35);
+    this.player.add(leftEye);
+
+    const rightEye = new THREE.Mesh(eyeGeo, eyeMat);
+    rightEye.position.set(0.15, 1.4, 0.35);
+    this.player.add(rightEye);
+
+    const pupilMat = new THREE.MeshBasicMaterial({ color: 0x000000 });
+    const pupilGeo = new THREE.SphereGeometry(0.05, 8, 8);
+
+    const leftPupil = new THREE.Mesh(pupilGeo, pupilMat);
+    leftPupil.position.set(-0.15, 1.4, 0.41);
+    this.player.add(leftPupil);
+
+    const rightPupil = new THREE.Mesh(pupilGeo, pupilMat);
+    rightPupil.position.set(0.15, 1.4, 0.41);
+    this.player.add(rightPupil);
+
+    // Body/Torso
+    const body = new THREE.Mesh(
+      new THREE.BoxGeometry(0.6, 0.85, 0.4),
+      new THREE.MeshStandardMaterial({
+        color: 0xff3366,
+        emissive: 0xcc0033,
+        emissiveIntensity: 0.3,
+        metalness: 0.4,
+        roughness: 0.7,
+      }),
+    );
+    body.position.y = 0.5;
+    body.castShadow = true;
+    body.receiveShadow = true;
+    this.player.add(body);
+
+    // Arms (left and right)
+    const armMat = new THREE.MeshStandardMaterial({
+      color: 0xffc9a8,
+      emissive: 0xff9955,
+      emissiveIntensity: 0.2,
+      metalness: 0.1,
+      roughness: 0.8,
+    });
+
+    const leftArm = new THREE.Mesh(
+      new THREE.BoxGeometry(0.2, 0.8, 0.25),
+      armMat,
+    );
+    leftArm.position.set(-0.5, 0.7, 0);
+    leftArm.rotation.z = 0.3;
+    leftArm.castShadow = true;
+    leftArm.receiveShadow = true;
+    this.player.add(leftArm);
+
+    const rightArm = new THREE.Mesh(
+      new THREE.BoxGeometry(0.2, 0.8, 0.25),
+      armMat,
+    );
+    rightArm.position.set(0.5, 0.7, 0);
+    rightArm.rotation.z = -0.3;
+    rightArm.castShadow = true;
+    rightArm.receiveShadow = true;
+    this.player.add(rightArm);
+
+    // Legs
+    const legMat = new THREE.MeshStandardMaterial({
+      color: 0x1a4d7a,
+      emissive: 0x0d2a4a,
+      emissiveIntensity: 0.2,
+      metalness: 0.2,
+      roughness: 0.8,
+    });
+
+    const leftLeg = new THREE.Mesh(
+      new THREE.BoxGeometry(0.25, 0.8, 0.3),
+      legMat,
+    );
+    leftLeg.position.set(-0.2, -0.2, 0);
+    leftLeg.castShadow = true;
+    leftLeg.receiveShadow = true;
+    this.player.add(leftLeg);
+
+    const rightLeg = new THREE.Mesh(
+      new THREE.BoxGeometry(0.25, 0.8, 0.3),
+      legMat,
+    );
+    rightLeg.position.set(0.2, -0.2, 0);
+    rightLeg.castShadow = true;
+    rightLeg.receiveShadow = true;
+    this.player.add(rightLeg);
+
+    // Shoes
+    const shoeMat = new THREE.MeshStandardMaterial({
+      color: 0xFF6B6B,
+      emissive: 0xDD4444,
+      emissiveIntensity: 0.4,
+      metalness: 0.5,
+      roughness: 0.6,
+    });
+
+    const leftShoe = new THREE.Mesh(
+      new THREE.BoxGeometry(0.32, 0.35, 0.5),
+      shoeMat,
+    );
+    leftShoe.position.set(-0.2, -0.9, 0);
+    leftShoe.castShadow = true;
+    leftShoe.receiveShadow = true;
+    this.player.add(leftShoe);
+
+    const rightShoe = new THREE.Mesh(
+      new THREE.BoxGeometry(0.32, 0.35, 0.5),
+      shoeMat,
+    );
+    rightShoe.position.set(0.2, -0.9, 0);
+    rightShoe.castShadow = true;
+    rightShoe.receiveShadow = true;
+    this.player.add(rightShoe);
+
+    this.player.position.set(0, 0, 0);
+    this.scene.add(this.player);
+  }
+
+  private buildRailway() {
+    // Main track surface
+    const trackMaterial = new THREE.MeshStandardMaterial({
+      color: 0x555555,
+      metalness: 0.4,
+      roughness: 0.6,
+    });
+
+    for (let i = 0; i < 50; i++) {
+      const platform = new THREE.Mesh(
+        new THREE.BoxGeometry(TRACK_WIDTH, 0.4, 4),
+        trackMaterial,
+      );
+      platform.position.z = -i * 4;
+      platform.castShadow = true;
+      platform.receiveShadow = true;
+      this.scene.add(platform);
+      this.platforms.push(platform);
+    }
+
+    // Track dividers
+    const dividerMaterial = new THREE.MeshStandardMaterial({
+      color: 0xffff99,
+      emissive: 0xffff00,
+      emissiveIntensity: 0.5,
+      metalness: 0.3,
+      roughness: 0.4,
+    });
+
+    for (const x of LANES) {
+      for (let i = 0; i < 50; i++) {
+        const divider = new THREE.Mesh(
+          new THREE.BoxGeometry(0.15, 0.45, 2),
+          dividerMaterial,
+        );
+        divider.position.set(x, 0.25, -i * 4 - 2);
+        divider.castShadow = true;
+        divider.receiveShadow = true;
+        this.scene.add(divider);
+        this.platforms.push(divider);
+      }
+    }
+
+    // Side borders/curbs
+    const curbMaterial = new THREE.MeshStandardMaterial({
+      color: 0x333333,
+      metalness: 0.2,
+      roughness: 0.8,
+    });
+
+    for (let i = 0; i < 50; i++) {
+      const leftCurb = new THREE.Mesh(
+        new THREE.BoxGeometry(0.3, 0.35, 4),
+        curbMaterial,
+      );
+      leftCurb.position.set(-TRACK_WIDTH / 2 - 0.15, 0.2, -i * 4);
+      leftCurb.castShadow = true;
+      this.scene.add(leftCurb);
+      this.platforms.push(leftCurb);
+
+      const rightCurb = new THREE.Mesh(
+        new THREE.BoxGeometry(0.3, 0.35, 4),
+        curbMaterial,
+      );
+      rightCurb.position.set(TRACK_WIDTH / 2 + 0.15, 0.2, -i * 4);
+      rightCurb.castShadow = true;
+      this.scene.add(rightCurb);
+      this.platforms.push(rightCurb);
+    }
+  }
+
+  private buildEnvironment() {
+    // Ground grass
+    const groundMaterial = new THREE.MeshStandardMaterial({
+      color: 0x4a9d5f,
+      metalness: 0.05,
+      roughness: 0.95,
+    });
+
+    const ground = new THREE.Mesh(
+      new THREE.PlaneGeometry(200, 600),
+      groundMaterial,
+    );
+    ground.rotation.x = -Math.PI / 2;
+    ground.position.y = -0.5;
+    ground.position.z = -150;
+    ground.receiveShadow = true;
+    this.scene.add(ground);
+
+    // Initial buildings and trees
+    for (let i = 0; i < 4; i++) {
+      this.spawnBuilding(-10, -i * 40);
+      this.spawnBuilding(10, -i * 40);
+      this.spawnTree(-8, -i * 40 - 20);
+      this.spawnTree(8, -i * 40 - 20);
+    }
+
+    this.buildingSpawnTimer = 25;
+  }
+
+  private spawnBuilding(sideX: number, zPos: number) {
+    const color = COLORS[Math.floor(Math.random() * COLORS.length)]!;
+    const height = 8 + Math.random() * 12;
+    const width = 4 + Math.random() * 3;
+    const depth = 5 + Math.random() * 3;
+
+    const building = new THREE.Mesh(
+      new THREE.BoxGeometry(width, height, depth),
+      new THREE.MeshStandardMaterial({
+        color: color,
+        metalness: 0.3,
+        roughness: 0.6,
+      }),
+    );
+
+    building.position.set(sideX, height / 2, zPos);
+    building.castShadow = true;
+    building.receiveShadow = true;
+    this.scene.add(building);
+    this.buildings.push(building);
+
+    // Windows with warm glow
+    const windowMaterial = new THREE.MeshBasicMaterial({
+      color: 0xffdd88,
+      blending: THREE.AdditiveBlending,
+    });
+
+    const windowCount = Math.floor(height / 1.8);
+    const windowCountHorizontal = Math.floor(width / 1.0);
+
+    for (let y = 0; y < windowCount; y++) {
+      for (let x = 0; x < windowCountHorizontal; x++) {
+        if (Math.random() > 0.2) {
+          const window = new THREE.Mesh(
+            new THREE.PlaneGeometry(0.7, 0.7),
+            windowMaterial,
+          );
+          window.position.set(
+            sideX + (x - windowCountHorizontal / 2) * 1.0 + 0.5,
+            height / 2 - 1 + y * 1.8,
+            zPos + depth / 2 + 0.05,
+          );
+          this.scene.add(window);
+          this.buildings.push(window);
+        }
+      }
+    }
+  }
+
+  private spawnTree(sideX: number, zPos: number) {
+    // Trunk
+    const trunk = new THREE.Mesh(
+      new THREE.CylinderGeometry(0.4, 0.5, 4, 8),
+      new THREE.MeshStandardMaterial({
+        color: 0x654321,
+        metalness: 0.1,
+        roughness: 0.9,
+      }),
+    );
+    trunk.position.set(sideX, 2, zPos);
+    trunk.castShadow = true;
+    trunk.receiveShadow = true;
+    this.scene.add(trunk);
+    this.trees.push(trunk);
+
+    // Foliage
+    const foliage = new THREE.Mesh(
+      new THREE.ConeGeometry(2.5, 5, 16),
+      new THREE.MeshStandardMaterial({
+        color: 0x2d5a2d,
+        metalness: 0.1,
+        roughness: 0.8,
+      }),
+    );
+    foliage.position.set(sideX, 5, zPos);
+    foliage.castShadow = true;
+    foliage.receiveShadow = true;
+    this.scene.add(foliage);
+    this.trees.push(foliage);
+  }
+
+  private spawnStreetLight(sideX: number, zPos: number) {
+    // Pole
+    const pole = new THREE.Mesh(
+      new THREE.CylinderGeometry(0.15, 0.15, 5, 6),
+      new THREE.MeshStandardMaterial({
+        color: 0x333333,
+        metalness: 0.6,
+        roughness: 0.4,
+      }),
+    );
+    pole.position.set(sideX, 2.5, zPos);
+    pole.castShadow = true;
+    pole.receiveShadow = true;
+    this.scene.add(pole);
+    this.lights.push(pole);
+
+    // Light bulb
+    const bulb = new THREE.Mesh(
+      new THREE.SphereGeometry(0.3, 8, 8),
       new THREE.MeshBasicMaterial({
-        color: 0xff4fd8,
-        transparent: true,
-        opacity: 0.4,
+        color: 0xffdd88,
         blending: THREE.AdditiveBlending,
       }),
     );
-    glow.position.z = 0.9;
-    glow.scale.set(1, 1, 1.8);
-    this.ship.add(glow);
+    bulb.position.set(sideX, 5, zPos);
+    this.scene.add(bulb);
+    this.lights.push(bulb);
 
-    const wings = new THREE.Mesh(
-      new THREE.BoxGeometry(2.2, 0.08, 0.5),
-      new THREE.MeshStandardMaterial({
-        color: 0x1b1040,
-        emissive: 0x5a1aff,
-        emissiveIntensity: 1.4,
-        metalness: 0.8,
-        roughness: 0.3,
-      }),
-    );
-    wings.position.z = 0.5;
-    this.ship.add(wings);
-
-    this.ship.position.set(0, 1.1, 0);
-    this.scene.add(this.ship);
-  }
-
-  private buildTunnel() {
-    const geo = new THREE.TorusGeometry(7, 0.05, 6, 40);
-    for (let i = 0; i < 30; i++) {
-      const m = new THREE.Mesh(
-        geo,
-        new THREE.MeshBasicMaterial({
-          color: i % 2 ? 0x35f2ff : 0xff4fd8,
-          transparent: true,
-          opacity: 0.5,
-          blending: THREE.AdditiveBlending,
-        }),
-      );
-      m.position.set(0, 2, -i * 9);
-      this.scene.add(m);
-      this.tunnelRings.push(m);
-    }
-  }
-
-  private buildGrid() {
-    const floor = new THREE.Mesh(
-      new THREE.PlaneGeometry(200, 400),
-      new THREE.MeshBasicMaterial({ color: 0x0a0320 }),
-    );
-    floor.rotation.x = -Math.PI / 2;
-    floor.position.set(0, -0.02, -120);
-    this.scene.add(floor);
-
-    const lineMat = new THREE.MeshBasicMaterial({
-      color: 0x35f2ff,
-      transparent: true,
-      opacity: 0.55,
-      blending: THREE.AdditiveBlending,
-      depthWrite: false,
-    });
-    // cross bars scrolling toward the camera
-    const barGeo = new THREE.PlaneGeometry(60, 0.08);
-    for (let i = 0; i < 40; i++) {
-      const bar = new THREE.Mesh(barGeo, lineMat);
-      bar.rotation.x = -Math.PI / 2;
-      bar.position.set(0, 0.03, -i * 6);
-      this.scene.add(bar);
-      this.floorBars.push(bar);
-    }
-    // lane rails
-    const railGeo = new THREE.PlaneGeometry(0.09, 400);
-    for (const x of [-3.3, -1.1, 1.1, 3.3]) {
-      const rail = new THREE.Mesh(
-        railGeo,
-        new THREE.MeshBasicMaterial({
-          color: 0xff4fd8,
-          transparent: true,
-          opacity: 0.35,
-          blending: THREE.AdditiveBlending,
-          depthWrite: false,
-        }),
-      );
-      rail.rotation.x = -Math.PI / 2;
-      rail.position.set(x, 0.03, -180);
-      this.scene.add(rail);
-    }
+    // Light effect
+    const pointLight = new THREE.PointLight(0xffdd88, 1.5, 30);
+    pointLight.position.set(sideX, 5, zPos);
+    pointLight.castShadow = true;
+    this.scene.add(pointLight);
   }
 
   start() {
     this.obstacles.forEach((o) => this.scene.remove(o));
-    this.orbs.forEach((o) => this.scene.remove(o));
+    this.coins.forEach((o) => this.scene.remove(o));
     this.obstacles = [];
-    this.orbs = [];
+    this.coins = [];
     this.score = 0;
     this.distance = 0;
-    this.speed = 22;
+    this.speed = 28;
     this.lane = 1;
+    this.laneX = 0;
     this.spawnTimer = 0;
     this.setState("playing");
     this.cb.onScore(0);
@@ -252,12 +529,12 @@ export class NeonRunner {
   move(dir: -1 | 1) {
     if (this.state !== "playing") return;
     this.lane = Math.max(0, Math.min(2, this.lane + dir));
-    this.shipTilt = dir * 0.5;
+    this.playerTilt = dir * 0.4;
   }
 
   private onKey = (e: KeyboardEvent) => {
-    if (e.key === "ArrowLeft" || e.key === "a") this.move(-1);
-    else if (e.key === "ArrowRight" || e.key === "d") this.move(1);
+    if (e.key === "ArrowLeft" || e.key === "a" || e.key === "A") this.move(-1);
+    else if (e.key === "ArrowRight" || e.key === "d" || e.key === "D") this.move(1);
     else if (e.key === " " && this.state !== "playing") this.start();
   };
 
@@ -278,39 +555,52 @@ export class NeonRunner {
 
   private spawn() {
     const lane = Math.floor(Math.random() * 3);
-    if (Math.random() < 0.32) {
-      const orb = new THREE.Mesh(
-        new THREE.IcosahedronGeometry(0.45, 1),
-        new THREE.MeshBasicMaterial({
-          color: 0xffe45e,
-          blending: THREE.AdditiveBlending,
-          transparent: true,
-          opacity: 0.95,
-        }),
-      );
-      orb.position.set(LANES[lane]!, 1.2, -120);
-      this.scene.add(orb);
-      this.orbs.push(orb);
-    } else {
-      const h = 1.6 + Math.random() * 1.6;
-      const ob = new THREE.Mesh(
-        new THREE.BoxGeometry(1.6, h, 1.6),
+
+    // Spawn coins (60% chance)
+    if (Math.random() < 0.6) {
+      const coin = new THREE.Mesh(
+        new THREE.CylinderGeometry(0.4, 0.4, 0.1, 16),
         new THREE.MeshStandardMaterial({
-          color: 0x2a0a4a,
-          emissive: 0xff2fd0,
-          emissiveIntensity: 1.1,
-          metalness: 0.7,
-          roughness: 0.25,
+          color: 0xFFD700,
+          emissive: 0xFFA500,
+          emissiveIntensity: 0.7,
+          metalness: 0.9,
+          roughness: 0.1,
         }),
       );
-      ob.position.set(LANES[lane]!, h / 2, -120);
+      coin.position.set(LANES[lane]!, 1.0, -130);
+      coin.rotation.x = Math.PI / 2;
+      coin.castShadow = true;
+      coin.receiveShadow = true;
+      this.scene.add(coin);
+      this.coins.push(coin);
+    } else {
+      // Spawn obstacles
+      const obstacleTypes = [
+        { w: 1.8, h: 2.2, d: 1.8, color: 0xFF6B6B },
+        { w: 1.8, h: 2.2, d: 1.8, color: 0x4ECDC4 },
+        { w: 1.6, h: 2.8, d: 1.6, color: 0xAA96DA },
+      ];
+
+      const type = obstacleTypes[Math.floor(Math.random() * obstacleTypes.length)]!;
+      const ob = new THREE.Mesh(
+        new THREE.BoxGeometry(type.w, type.h, type.d),
+        new THREE.MeshStandardMaterial({
+          color: type.color,
+          metalness: 0.4,
+          roughness: 0.5,
+        }),
+      );
+      ob.position.set(LANES[lane]!, type.h / 2 + 0.2, -130);
+      ob.castShadow = true;
+      ob.receiveShadow = true;
       this.scene.add(ob);
       this.obstacles.push(ob);
     }
   }
 
   private crash() {
-    this.shake = 1.4;
+    this.shake = 1.0;
     this.setState("over");
   }
 
@@ -321,111 +611,176 @@ export class NeonRunner {
     const t = this.clock.elapsedTime;
 
     const playing = this.state === "playing";
-    const v = playing ? this.speed : 6;
+    const v = playing ? this.speed : 8;
 
     if (playing) {
-      this.speed += dt * 0.55;
+      this.speed += dt * 0.9;
       this.distance += v * dt;
-      const s = Math.floor(this.distance / 4) + this.score;
-      this.cb.onScore(s);
-      this.cb.onSpeed(Math.round(this.speed * 8));
+      this.cb.onSpeed(Math.round(this.speed * 1.5));
+
+      // Spawn obstacles
       this.spawnTimer -= dt;
       if (this.spawnTimer <= 0) {
         this.spawn();
-        this.spawnTimer = Math.max(0.28, 0.85 - this.speed * 0.012);
+        this.spawnTimer = Math.max(0.35, 1.2 - this.speed * 0.015);
+      }
+
+      // Spawn scenery
+      this.buildingSpawnTimer -= dt;
+      if (this.buildingSpawnTimer <= 0) {
+        const side = Math.random() > 0.5 ? -10 : 10;
+        this.spawnBuilding(side, this.distance - 100);
+        if (Math.random() > 0.7) {
+          this.spawnTree(side + (Math.random() > 0.5 ? 2 : -2), this.distance - 100 + 20);
+        }
+        if (Math.random() > 0.8) {
+          this.spawnStreetLight(side, this.distance - 100 + 40);
+        }
+        this.buildingSpawnTimer = 30;
       }
     }
 
-    // ship motion
+    // Player animation and movement
     const targetX = LANES[this.lane]!;
-    this.laneX += (targetX - this.laneX) * Math.min(1, dt * 12);
-    this.shipTilt += (0 - this.shipTilt) * Math.min(1, dt * 6);
-    this.ship.position.x = this.laneX;
-    this.ship.position.y = 1.1 + Math.sin(t * 3) * 0.12;
-    this.ship.rotation.z = this.shipTilt + (targetX - this.laneX) * -0.35;
-    this.ship.rotation.y = (targetX - this.laneX) * -0.15;
+    this.laneX += (targetX - this.laneX) * Math.min(1, dt * 9);
+    this.playerTilt += (0 - this.playerTilt) * Math.min(1, dt * 8);
+
+    this.player.position.x = this.laneX;
+    this.player.position.y = 0.05;
+
+    // Running animation
+    if (playing) {
+      this.playerRunAnimation += dt * this.speed;
+      const armSwing = Math.sin(this.playerRunAnimation * Math.PI * 2) * 0.6;
+      
+      // Animate arms
+      const arms = this.player.children.filter((c: any) => c.position.x !== undefined && Math.abs(c.position.x) > 0.4);
+      if (arms.length >= 2) {
+        (arms[0] as THREE.Mesh).rotation.z = 0.3 + armSwing * 0.4;
+        (arms[1] as THREE.Mesh).rotation.z = -0.3 - armSwing * 0.4;
+      }
+    }
+
+    this.player.rotation.z = this.playerTilt + (targetX - this.laneX) * -0.2;
+    this.player.rotation.y = (targetX - this.laneX) * -0.15;
+
     if (this.state === "over") {
-      this.ship.rotation.x += dt * 4;
-      this.ship.position.y = Math.max(0.2, this.ship.position.y - dt * 2);
+      this.player.rotation.x += dt * 6;
+      this.player.position.y = Math.max(-1, this.player.position.y - dt * 4);
     }
 
-    // trail
-    const tp = this.trailPositions;
-    tp[this.trailIndex * 3] = this.ship.position.x + (Math.random() - 0.5) * 0.25;
-    tp[this.trailIndex * 3 + 1] = this.ship.position.y + (Math.random() - 0.5) * 0.2;
-    tp[this.trailIndex * 3 + 2] = 1.4;
-    this.trailIndex = (this.trailIndex + 1) % (tp.length / 3);
-    for (let i = 0; i < tp.length / 3; i++) {
-      const nz = tp[i * 3 + 2]! + v * dt * 0.9;
-      tp[i * 3 + 2] = nz > 4.5 ? 999 : nz;
+    // Scroll platforms
+    for (let i = this.platforms.length - 1; i >= 0; i--) {
+      const p = this.platforms[i]!;
+      p.position.z += v * dt;
+      if (p.position.z > 10) {
+        this.scene.remove(p);
+        this.platforms.splice(i, 1);
+      }
     }
-    this.trail.geometry.attributes['position']!.needsUpdate = true;
 
-    // world scroll
-    for (const bar of this.floorBars) {
-      bar.position.z += v * dt;
-      if (bar.position.z > 12) bar.position.z -= 40 * 6;
-    }
-    for (const r of this.tunnelRings) {
-      r.position.z += v * dt;
-      r.rotation.z += dt * 0.4;
-      if (r.position.z > 12) r.position.z -= 30 * 9;
-    }
-    const sPos = this.stars.geometry.attributes['position'] as THREE.BufferAttribute;
-    for (let i = 0; i < sPos.count; i++) {
-      let z = sPos.getZ(i) + v * dt * 1.4;
-      if (z > 10) z -= 260;
-      sPos.setZ(i, z);
-    }
-    sPos.needsUpdate = true;
+    // Add new platforms
+    if (this.platforms.length < 60) {
+      const newZ = this.platforms.length > 0 ? this.platforms[0]!.position.z - 4 : -200;
 
+      const trackMaterial = new THREE.MeshStandardMaterial({
+        color: 0x555555,
+        metalness: 0.4,
+        roughness: 0.6,
+      });
+
+      const platform = new THREE.Mesh(
+        new THREE.BoxGeometry(TRACK_WIDTH, 0.4, 4),
+        trackMaterial,
+      );
+      platform.position.z = newZ;
+      platform.castShadow = true;
+      platform.receiveShadow = true;
+      this.scene.add(platform);
+      this.platforms.push(platform);
+    }
+
+    // Obstacles collision and animation
     for (let i = this.obstacles.length - 1; i >= 0; i--) {
       const o = this.obstacles[i]!;
       o.position.z += v * dt;
-      o.rotation.y += dt * 1.2;
-      if (playing && o.position.z > -0.9 && o.position.z < 1.1) {
-        if (Math.abs(o.position.x - this.ship.position.x) < 1.1) this.crash();
+      o.rotation.y += dt * 2.5;
+      o.rotation.x += dt * 1;
+
+      if (playing && o.position.z > -1.5 && o.position.z < 1.5) {
+        if (Math.abs(o.position.x - this.player.position.x) < 0.85) {
+          this.crash();
+        }
       }
-      if (o.position.z > 14) {
+
+      if (o.position.z > 15) {
         this.scene.remove(o);
         this.obstacles.splice(i, 1);
       }
     }
 
-    for (let i = this.orbs.length - 1; i >= 0; i--) {
-      const o = this.orbs[i]!;
-      o.position.z += v * dt;
-      o.rotation.x += dt * 2;
-      o.rotation.y += dt * 3;
-      o.scale.setScalar(1 + Math.sin(t * 6 + i) * 0.15);
+    // Coins collection
+    for (let i = this.coins.length - 1; i >= 0; i--) {
+      const c = this.coins[i]!;
+      c.position.z += v * dt;
+      c.rotation.z += dt * 5;
+      c.rotation.x += dt * 2.5;
+      c.position.y = 1.0 + Math.sin(t * 3 + i) * 0.3;
+      c.scale.setScalar(1 + Math.sin(t * 4 + i * 0.5) * 0.1);
+
       const hit =
         playing &&
-        Math.abs(o.position.z) < 1.2 &&
-        Math.abs(o.position.x - this.ship.position.x) < 1.1;
+        Math.abs(c.position.z) < 1.5 &&
+        Math.abs(c.position.x - this.player.position.x) < 0.85;
+
       if (hit) {
-        this.score += 25;
-        this.shake = 0.25;
-        this.scene.remove(o);
-        this.orbs.splice(i, 1);
+        this.score += 10;
+        this.shake = 0.2;
+        this.scene.remove(c);
+        this.coins.splice(i, 1);
         continue;
       }
-      if (o.position.z > 14) {
-        this.scene.remove(o);
-        this.orbs.splice(i, 1);
+
+      if (c.position.z > 15) {
+        this.scene.remove(c);
+        this.coins.splice(i, 1);
       }
     }
 
-    // camera: follow + shake + speed FOV
-    this.shake = Math.max(0, this.shake - dt * 2);
-    const sx = (Math.random() - 0.5) * this.shake;
-    const sy = (Math.random() - 0.5) * this.shake;
-    this.camera.position.x += (this.ship.position.x * 0.55 + sx - this.camera.position.x) * Math.min(1, dt * 6);
-    this.camera.position.y = 6.2 + sy + Math.sin(t * 1.5) * 0.08;
-    this.camera.position.z = 9.5;
-    this.camera.lookAt(this.ship.position.x * 0.6, -1.2, -20);
-    this.camera.rotation.z += this.shipTilt * 0.12;
-    const targetFov = playing ? 72 + Math.min(18, this.speed - 22) : 66;
-    this.camera.fov += (targetFov - this.camera.fov) * Math.min(1, dt * 3);
+    // Remove far scenery
+    for (let i = this.buildings.length - 1; i >= 0; i--) {
+      const b = this.buildings[i]!;
+      if (b.position.z > 80) {
+        this.scene.remove(b);
+        this.buildings.splice(i, 1);
+      }
+    }
+
+    // Update score
+    const s = this.score + Math.floor(this.distance / 5);
+    this.cb.onScore(s);
+
+    // Camera shake
+    this.shake = Math.max(0, this.shake - dt * 3);
+    const sx = (Math.random() - 0.5) * this.shake * 0.6;
+    const sy = (Math.random() - 0.5) * this.shake * 0.6;
+
+    // Smooth camera follow
+    const targetCameraX = this.player.position.x * 0.35 + sx;
+    const targetCameraY = 5.2 + sy + Math.sin(t * 0.6) * 0.15;
+    const targetCameraZ = this.player.position.z + 8.5;
+
+    this.camera.position.x += (targetCameraX - this.camera.position.x) * Math.min(1, dt * 5);
+    this.camera.position.y += (targetCameraY - this.camera.position.y) * Math.min(1, dt * 5);
+    this.camera.position.z += (targetCameraZ - this.camera.position.z) * Math.min(1, dt * 8);
+
+    const lookAheadZ = this.player.position.z - 30;
+    this.camera.lookAt(this.player.position.x * 0.2, 1.2, lookAheadZ);
+    this.camera.rotation.z += this.playerTilt * 0.06;
+
+    // Dynamic FOV
+    const targetFov = playing ? 60 + Math.min(18, (this.speed - 28) * 0.7) : 55;
+    this.camera.fov += (targetFov - this.camera.fov) * Math.min(1, dt * 2);
     this.camera.updateProjectionMatrix();
 
     this.renderer.render(this.scene, this.camera);
